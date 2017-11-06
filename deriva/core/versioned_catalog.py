@@ -2,8 +2,7 @@ import io
 import re
 import sys
 
-from . import get_credential, urlquote
-from .ermrest_catalog import ErmrestCatalog
+from . import urlquote
 from .utils.hash_utils import compute_hashes
 
 if sys.version_info > (3,):
@@ -24,94 +23,75 @@ class VersionedCatalogError(Exception):
             self.message = message
 
 
-class VersionedCatalog:
+#def checksum_str(text, hashalg='sha256'):
+#        """
+#        """
+#        fd = io.BytesIO(text).encode())
+#
+#        # Get back a dictionary of hash codes....
+#       hashcodes = compute_hashes(fd, [hashalg])
+#       return hashcodes[hashalg][0]
 
-    def __init__(self, url, host=None, cid=None, version=None):
 
-        # Initialize everything to None.
-        self.scheme = self.host = self.query = self.fragment = self.id = self.version = self.path = None
+def parse_catalog_uri(uri):
+    """
+    Parse a URL to an ermrest catalog, defaulting the version to the current version if not provided
 
-        # Figure out if we have a scheme/host/id triple, or a real URL.
-        if url == 'http' or url == 'https':
-            if host is None:
-                raise VersionedCatalogError('ERMRest host name required')
-            if cid is None:
-                raise VersionedCatalogError('Catalog ID number required')
-            if not str(id).isdigit():
-                raise VersionedCatalogError('Catalog ID must be an integer')
+    :param uri: catalog URL
 
-            url = '%s://%s/ermrest/catalog/%s' % (url, host, id)
+    """
+    urlparts = urlsplit(uri, scheme='https')
 
-        vc = self.ParseCatalogURL(url, version)
+    scheme = urlparts.scheme
+    host = urlparts.netloc
+    query = urlparts.query
+    fragment = urlparts.fragment
 
-        self.scheme = vc['scheme']
-        self.host = vc['host']
-        self.query = vc['query']
-        self.fragment = vc['fragment']
-        self.id = vc['id']
-        self.version = vc['version']
-        self.path = vc['path']
+    if not urlparts.path.startswith('/ermrest/catalog'):
+        raise VersionedCatalogError('Catalog URL must start with ermrest/catalog')
 
-    def ParseCatalogURL(self, url, version=None):
-        """
-        Parse a URL to an ermrest catalog, defaulting the version to the current version if not provided
+    # Look in the path and pull out id, version number if it exists, and ermrest path....
+    catparts = re.match(r'(/ermrest/catalog/(?P<id>\d+)(@(?P<version>[^/]+))?)?(?P<path>.*)', urlparts.path)
 
-        :param url: catalog URL
+    cid, version, path = catparts.group('id', 'version', 'path')
+    if host is None:
+        raise VersionedCatalogError('ERMRest host name required')
+    if cid is None:
+        raise VersionedCatalogError('Catalog ID number required')
+    if not str(cid).isdigit():
+        raise VersionedCatalogError('Catalog ID must be an integer: {0}'.format(cid))
+   # should check snapshot ID here....
 
-        """
-        urlparts = urlsplit(url, scheme='https')
+    return {'scheme': scheme, 'host': host, 'query': query, 'fragment': fragment,
+            'id': cid, 'version': version, 'path': path}
 
-        scheme = urlparts.scheme
-        host = urlparts.netloc
-        query = urlparts.query
-        fragment = urlparts.fragment
 
-        # Look in the path and pull out id, version number if it exists, and ermrest path....
-        catparts = re.match(r'(/ermrest/catalog/(?P<id>\d+)(@(?P<version>[^/]+))?)?(?P<path>.*)', urlparts.path)
+def current_catalog_version(catalog):
+    return catalog.get('/').json()['version']
 
-        cid, version, path = catparts.group('id', 'version', 'path')
 
-        # fill in missing values ....
-        scheme = scheme if scheme is not None else self.scheme
-        host = host if host is not None else self.host
-        cid = cid if cid is not None else self.id
-        version = version if version is not None else self.version
+def path_version(path):
+    vc = parse_catalog_uri(path)
+    return vc['version']
 
-        # If there was no version in the URL, either use provided version, or current version.
-        if version is None:
-            credential = get_credential(host)
-            catalog = ErmrestCatalog(scheme, host, cid, credentials=credential)
 
-            # Get current version of catalog and construct a new URL that fully qualifies catalog with version.
-            version = catalog.get('/').json()['version']
+def versioned_path(path, version=None):
+    """
+    Add or remover snapshot ids from a ERMRest path.
 
-        return {'scheme': scheme, 'host': host, 'query': query, 'fragment': fragment,
-                'id': cid, 'version': version, 'path': path}
+    :param path:
+    :param version: Version number to use for the path.  If None, remove the version number if it exists.
+    :return: versioned path
+    """
+    vc = parse_catalog_uri(path)
 
-    def uri(self, path=None, version=None):
+    if len(vc['path']) > 0 and vc['path'][0] != '/':
+        vc['path'] = '/' + vc['path']
 
-        # Use path if it is provided as an argument.
-        path = self.path if path is None else path
+    if version is None:
+        vpath = 'ermrest/catalog/{0}{1}'.format(vc['id'], vc['path'])
+    else:
+        vpath = 'ermrest/catalog/{0}@{1}{2}'.format(vc['id'],version,vc['path'])
 
-        vc = self.ParseCatalogURL(path, version)
-
-        if len(vc['path']) > 0 and vc['path'][0] != '/':
-            vc['path'] = '/' + vc['path']
-
-        versioned_path = \
-            urlquote('/ermrest/catalog/%s' % (vc['id'])) + '@' + urlquote('%s%s' % (vc['version'], vc['path']))
-
-        url = urlunsplit([vc['scheme'], vc['host'], versioned_path, vc['query'], vc['fragment']])
-        return url
-
-    def checksum(self, path=None, version=None, hashalg='sha256'):
-        """
-        """
-        # Use path if it is provided as an argument.
-        path = self.path if path is None else path
-
-        fd = io.BytesIO(self.uri(path, version).encode())
-
-        # Get back a dictionary of hash codes....
-        hashcodes = compute_hashes(fd, [hashalg])
-        return hashcodes[hashalg][0]
+    url = urlunsplit([vc['scheme'], vc['host'], vpath, vc['query'], vc['fragment']])
+    return url
